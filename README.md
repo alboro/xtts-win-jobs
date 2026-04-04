@@ -1,20 +1,23 @@
-﻿# tts-win
+# tts-win
 
-Minimal Windows-first XTTS v2 CLI for local voice cloning with CUDA.
+Minimal Windows-first XTTS v2 toolkit for local voice cloning with CUDA.
 
-This project is intentionally small. Most XTTS repositories are web UIs, API servers, or training stacks. `tts-win` is the opposite: a local Windows CLI that reads a text file, finds a reference voice, runs XTTS on NVIDIA GPU, and writes a `.wav`.
+The repo has two layers:
+
+- a local CLI for direct synthesis
+- a native async FastAPI jobs server for polling-based workflows
 
 ## Features
 
-- Windows-native CLI, no Docker required
+- Windows-native, no Docker required
 - XTTS v2 voice cloning
 - Russian-first workflow
-- file-first input
+- file-first CLI input
 - automatic reference discovery from `shared/`
 - newest matching reference wins by prefix, regardless of format
 - ffmpeg-based reference conversion when needed
-- model-managed sentence splitting by default, plus XTTS internal long-sentence splitting
-- external manual chunking only as fallback or on demand
+- model-managed sentence splitting by default, with external chunking only as fallback or on demand
+- async `/v1/tts/jobs` API with polling and audio download
 - start/end timing, estimated speech duration, and throughput logs
 
 ## Requirements
@@ -31,6 +34,7 @@ Tested stack in this repo:
 - `torch 2.8.0+cu128`
 - `torchaudio 2.8.0+cu128`
 - `coqui-tts 0.27.5`
+- `spacy 3.8+`
 
 ## Quick Start
 
@@ -44,15 +48,15 @@ Put your files into `shared/`:
 - `text.txt`
 - `reference.wav`
 
-Then run:
+Run the CLI:
 
 ```cmd
 tts-win.cmd text.txt .\output\speech.wav
 ```
 
-## How Reference Lookup Works
+## CLI Reference Lookup
 
-By default the tool searches inside `shared/` for files whose name starts with `reference`.
+By default the CLI searches inside `shared/` for files whose name starts with `reference`.
 
 Examples:
 
@@ -74,33 +78,70 @@ Or an explicit file:
 tts-win.cmd text.txt .\output\speech.wav .\shared\alla_2026-04-04.m4a
 ```
 
-## Usage
+## Async Server
 
-Default mode uses a text file as the first positional argument:
-
-```cmd
-tts-win.cmd text.txt .\output\speech.wav
-```
-
-Inline text is still supported:
+Start the server:
 
 ```cmd
-tts-win.cmd --text "Привет. Это тест." .\output\hello.wav
+tts-win-server.cmd --host 127.0.0.1 --port 8020
 ```
 
-Useful options:
+Health check:
 
 ```cmd
-tts-win.cmd --overwrite text.txt .\output\speech.wav
-tts-win.cmd --chunk-mode auto text.txt .\output\speech.wav
-tts-win.cmd --chunk-mode on text.txt .\output\speech.wav
-tts-win.cmd --chunk-mode off text.txt .\output\speech.wav
-tts-win.cmd --reference-prefix reference text.txt .\output\speech.wav
+curl http://127.0.0.1:8020/health
 ```
+
+Create a job with a shared voice prefix:
+
+```json
+POST /v1/tts/jobs
+{
+  "input": "Привет. Это тест.",
+  "voice": "reference",
+  "response_format": "wav"
+}
+```
+
+Create a job with a per-request uploaded reference:
+
+```json
+POST /v1/tts/jobs
+{
+  "input": "Привет. Это тест.",
+  "voice": "reference",
+  "response_format": "wav",
+  "reference_audio_base64": "<base64-or-data-uri>",
+  "reference_audio_filename": "sample.m4a"
+}
+```
+
+Poll status:
+
+```cmd
+curl http://127.0.0.1:8020/v1/tts/jobs/<job_id>
+```
+
+Download audio when ready:
+
+```cmd
+curl http://127.0.0.1:8020/v1/tts/jobs/<job_id>/audio --output result.wav
+```
+
+## API Notes
+
+- `voice` is a local voice identifier or shared reference prefix, not an OpenAI-hosted voice.
+- `reference_audio_base64` overrides `voice` for that request.
+- `reference_audio_base64` may be raw base64 or a `data:` URI.
+- `/v1/tts/jobs/{id}/audio` returns `409` until the final file exists.
+- `response_format` is currently `wav` only.
+- the server uses one in-process worker, which keeps GPU generation serialized and simple.
+- jobs are persisted under `.data/jobs/`.
+- the first request after server start may spend noticeable time on model warm-up.
 
 ## Chunking Strategy
 
-`tts-win` now prefers the model's own sentence splitting first, and also lets XTTS split overlong sentences internally when needed.
+`tts-win` prefers the model's own sentence splitting first and lets XTTS split overlong sentences internally when needed.
 
 That usually sounds better than manual chunk boundaries.
 
@@ -112,12 +153,13 @@ That usually sounds better than manual chunk boundaries.
 
 ## Project Layout
 
-- `src/tts_win/`: CLI implementation
+- `src/tts_win/`: CLI and server implementation
 - `scripts/`: Windows bootstrap helpers
 - `shared/`: your local text and reference files
 - `output/`: generated audio
+- `.data/jobs/`: persisted async jobs
 
-The contents of `shared/` and `output/` are intentionally ignored by git.
+The contents of `shared/`, `output/`, and local research folders are intentionally ignored by git.
 
 ## Responsible Use
 
@@ -128,4 +170,3 @@ XTTS models are subject to the Coqui Public Model License. Setting `COQUI_TOS_AG
 ## License
 
 MIT for the code in this repository. Third-party models and dependencies keep their own licenses.
-

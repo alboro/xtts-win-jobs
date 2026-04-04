@@ -1,26 +1,28 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tts-win"
-version = "0.2.0"
-description = "Minimal Windows-first XTTS v2 CLI for local voice cloning."
+version = "0.3.0"
+description = "Minimal Windows-first XTTS v2 CLI and async jobs server for local voice cloning."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = {file = "LICENSE"}
 dependencies = [
     "coqui-tts==0.27.5",
+    "fastapi>=0.115,<1",
     "spacy>=3.8,<4",
     "transformers>=4.57,<5",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.scripts]
 tts-win = "tts_win.cli:main"
+tts-win-server = "tts_win.server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

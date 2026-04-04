@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import os
@@ -12,6 +12,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 XTTS_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
 DEFAULT_LANGUAGE = "ru"
@@ -553,19 +554,21 @@ def synthesize_chunked(
     work_dir: Path,
     ffmpeg_bin: str,
     max_chars: int,
+    log: Callable[[str], None] | None = None,
 ) -> int:
+    emit = log or print
     chunks = split_text_for_xtts(text, max_chars=max_chars)
     if not chunks:
         raise RuntimeError("Chunking produced no text chunks.")
 
     if len(chunks) == 1:
         chunk_started = time.perf_counter()
-        print(
+        emit(
             f"[chunk 1/1] start | {len(chunks[0])} chars | "
             f"est. {format_duration(estimate_audio_duration_seconds(chunks[0]))}"
         )
         synthesize_to_file(tts, chunks[0], reference_wav, output_path)
-        print(f"[chunk 1/1] done | {format_duration(time.perf_counter() - chunk_started)}")
+        emit(f"[chunk 1/1] done | {format_duration(time.perf_counter() - chunk_started)}")
         return 1
 
     chunk_dir = work_dir / "chunks"
@@ -575,19 +578,19 @@ def synthesize_chunked(
     for index, chunk_text in enumerate(chunks, start=1):
         chunk_path = chunk_dir / f"chunk_{index:03d}.wav"
         chunk_started = time.perf_counter()
-        print(
+        emit(
             f"[chunk {index}/{len(chunks)}] start | {len(chunk_text)} chars | "
             f"est. {format_duration(estimate_audio_duration_seconds(chunk_text))}"
         )
         synthesize_to_file(tts, chunk_text, reference_wav, chunk_path)
         chunk_elapsed = time.perf_counter() - chunk_started
-        print(f"[chunk {index}/{len(chunks)}] done | {format_duration(chunk_elapsed)}")
+        emit(f"[chunk {index}/{len(chunks)}] done | {format_duration(chunk_elapsed)}")
         chunk_paths.append(chunk_path)
 
     concat_started = time.perf_counter()
-    print("Concatenating chunks...")
+    emit("Concatenating chunks...")
     concatenate_chunks(chunk_paths, output_path, ffmpeg_bin)
-    print(f"Concatenation done | {format_duration(time.perf_counter() - concat_started)}")
+    emit(f"Concatenation done | {format_duration(time.perf_counter() - concat_started)}")
     return len(chunk_paths)
 
 
