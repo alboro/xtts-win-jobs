@@ -1,6 +1,8 @@
-# tts-win
+# xtts-win-jobs
 
 Minimal Windows-first XTTS v2 toolkit for local voice cloning with CUDA.
+
+This is a vibecoding project for personal use. It is intentionally pragmatic and narrow: a small local XTTS toolchain that works on Windows with CUDA, shared voice references, and a simple async jobs API.
 
 The repo has two layers:
 
