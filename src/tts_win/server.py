@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,7 +275,10 @@ class SynthesisWorker:
                 self.store.update_job(job_id, status="in_progress", started_at=started_at)
                 log_line(log_file, f"Job {job_id} started at {started_at}")
 
-                loaded_model = self._ensure_model()
+                # Coqui/Torch may write progress noise to stdout/stderr while loading the model
+                # or synthesizing. Keep that scoped to the per-job log instead of the server console.
+                with redirect_stdout(log_file), redirect_stderr(log_file):
+                    loaded_model = self._ensure_model()
                 log_line(log_file, f"Model ready on device {loaded_model.device} in {loaded_model.load_seconds:.2f}s")
 
                 reference_path = self._resolve_reference_path(job_id, job)
@@ -288,14 +291,15 @@ class SynthesisWorker:
                 runtime_started = time.perf_counter()
                 synthesis_started = time.perf_counter()
 
-                chunk_count = self._run_synthesis(
-                    loaded_model=loaded_model,
-                    text=self._load_job_text(job_id),
-                    reference_path=reference_path,
-                    output_path=output_path,
-                    ffmpeg_bin=ffmpeg_bin,
-                    log=lambda message: log_line(log_file, message),
-                )
+                with redirect_stdout(log_file), redirect_stderr(log_file):
+                    chunk_count = self._run_synthesis(
+                        loaded_model=loaded_model,
+                        text=self._load_job_text(job_id),
+                        reference_path=reference_path,
+                        output_path=output_path,
+                        ffmpeg_bin=ffmpeg_bin,
+                        log=lambda message: log_line(log_file, message),
+                    )
 
                 synthesis_seconds = time.perf_counter() - synthesis_started
                 wall_seconds = time.perf_counter() - runtime_started
@@ -567,7 +571,7 @@ def log_line(handle, message: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     settings = parse_args(argv)
     app = create_app(settings)
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    uvicorn.run(app, host=settings.host, port=settings.port, access_log=False, log_level="warning")
     return 0
 
 

@@ -88,6 +88,8 @@ Start the server:
 tts-win-server.cmd --host 127.0.0.1 --port 8020
 ```
 
+This `127.0.0.1:8020` endpoint is the default target expected by the local `epub_to_audiobook` helper script.
+
 Health check:
 
 ```cmd
