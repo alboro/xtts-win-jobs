@@ -4,6 +4,7 @@ import argparse
 import base64
 import binascii
 import json
+import logging
 import queue
 import shutil
 import tempfile
@@ -12,7 +13,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +46,9 @@ DEFAULT_JOB_OUTPUT_NAME = "audio.wav"
 SUPPORTED_RESPONSE_FORMATS = {"wav"}
 DEFAULT_SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8020
+DEFAULT_JOB_RETENTION_HOURS = 24
+DEFAULT_DOWNLOADED_JOB_RETENTION_HOURS = 6
+DEFAULT_CLEANUP_INTERVAL_SECONDS = 900
 
 AUDIO_MIME_TO_EXT = {
     "audio/wav": ".wav",
@@ -85,6 +89,9 @@ class ServerSettings:
     ffmpeg: str = "ffmpeg"
     chunk_mode: str = "auto"
     max_chars: int = DEFAULT_MAX_CHARS
+    job_retention_hours: int = DEFAULT_JOB_RETENTION_HOURS
+    downloaded_job_retention_hours: int = DEFAULT_DOWNLOADED_JOB_RETENTION_HOURS
+    cleanup_interval_seconds: int = DEFAULT_CLEANUP_INTERVAL_SECONDS
 
 
 @dataclass(slots=True)
@@ -92,6 +99,9 @@ class LoadedModel:
     tts: Any
     device: str
     load_seconds: float
+
+
+logger = logging.getLogger(__name__)
 
 
 class JobStore:
@@ -144,6 +154,9 @@ class JobStore:
             "metadata": request.metadata or {},
             "voice_source": "uploaded_reference" if request.reference_audio_base64 else "shared_voice",
             "reference_filename": None,
+            "download_count": 0,
+            "first_downloaded_at": None,
+            "last_downloaded_at": None,
             "external_chunks_used": None,
             "runtime_seconds": None,
             "model_load_seconds": None,
@@ -194,6 +207,19 @@ class JobStore:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
 
+    def mark_downloaded(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            now = utcnow_iso()
+            job["download_count"] = int(job.get("download_count") or 0) + 1
+            job["first_downloaded_at"] = job.get("first_downloaded_at") or now
+            job["last_downloaded_at"] = now
+            job["updated_at"] = now
+            self._write_job(job)
+            return dict(job)
+
     def public_view(self, job: dict[str, Any]) -> dict[str, Any]:
         public_job = dict(job)
         public_job.pop("audio_path", None)
@@ -214,11 +240,99 @@ class JobStore:
     def job_dir(self, job_id: str) -> Path:
         return self.jobs_dir / job_id
 
+    def cleanup_expired(
+        self,
+        *,
+        job_retention: timedelta,
+        downloaded_job_retention: timedelta,
+    ) -> list[str]:
+        expired: list[tuple[str, Path]] = []
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            for job_id, job in list(self._jobs.items()):
+                if not self._is_terminal(job):
+                    continue
+                if not self._is_expired(
+                    job,
+                    now=now,
+                    job_retention=job_retention,
+                    downloaded_job_retention=downloaded_job_retention,
+                ):
+                    continue
+                expired.append((job_id, self.job_dir(job_id)))
+                self._jobs.pop(job_id, None)
+
+        removed_ids: list[str] = []
+        for job_id, job_dir in expired:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            removed_ids.append(job_id)
+        return removed_ids
+
     def _write_job(self, job: dict[str, Any]) -> None:
         (self.job_dir(job["id"]) / "job.json").write_text(
             json.dumps(job, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _is_terminal(job: dict[str, Any]) -> bool:
+        return str(job.get("status") or "") in {"completed", "failed"}
+
+    def _is_expired(
+        self,
+        job: dict[str, Any],
+        *,
+        now: datetime,
+        job_retention: timedelta,
+        downloaded_job_retention: timedelta,
+    ) -> bool:
+        downloaded_at = parse_iso_datetime(job.get("last_downloaded_at"))
+        if downloaded_at is not None:
+            return now >= downloaded_at + downloaded_job_retention
+
+        terminal_at = (
+            parse_iso_datetime(job.get("completed_at"))
+            or parse_iso_datetime(job.get("failed_at"))
+            or parse_iso_datetime(job.get("updated_at"))
+        )
+        if terminal_at is None:
+            return False
+        return now >= terminal_at + job_retention
+
+
+class JobGarbageCollector:
+    def __init__(self, settings: ServerSettings, store: JobStore):
+        self.settings = settings
+        self.store = store
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="tts-job-cleaner", daemon=True)
+        self._startup_lock = threading.Lock()
+        self._started = False
+
+    def start(self) -> None:
+        with self._startup_lock:
+            if self._started:
+                return
+            self._thread.start()
+            self._started = True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def sweep_now(self) -> list[str]:
+        removed = self.store.cleanup_expired(
+            job_retention=timedelta(hours=self.settings.job_retention_hours),
+            downloaded_job_retention=timedelta(hours=self.settings.downloaded_job_retention_hours),
+        )
+        if removed:
+            logger.info("Cleaned up %s expired TTS job(s): %s", len(removed), ", ".join(removed))
+        return removed
+
+    def _run(self) -> None:
+        self.sweep_now()
+        while not self._stop_event.wait(self.settings.cleanup_interval_seconds):
+            self.sweep_now()
 
 
 class SynthesisWorker:
@@ -410,6 +524,17 @@ def parse_args(argv: list[str] | None = None) -> ServerSettings:
     parser.add_argument("--model", default=XTTS_MODEL)
     parser.add_argument("--chunk-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument("--job-retention-hours", type=int, default=DEFAULT_JOB_RETENTION_HOURS)
+    parser.add_argument(
+        "--downloaded-job-retention-hours",
+        type=int,
+        default=DEFAULT_DOWNLOADED_JOB_RETENTION_HOURS,
+    )
+    parser.add_argument(
+        "--cleanup-interval-seconds",
+        type=int,
+        default=DEFAULT_CLEANUP_INTERVAL_SECONDS,
+    )
     args = parser.parse_args(argv)
     return ServerSettings(
         host=args.host,
@@ -421,6 +546,9 @@ def parse_args(argv: list[str] | None = None) -> ServerSettings:
         model=args.model,
         chunk_mode=args.chunk_mode,
         max_chars=args.max_chars,
+        job_retention_hours=max(args.job_retention_hours, 0),
+        downloaded_job_retention_hours=max(args.downloaded_job_retention_hours, 0),
+        cleanup_interval_seconds=max(args.cleanup_interval_seconds, 1),
     )
 
 
@@ -431,28 +559,36 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     )
     store = JobStore(server_settings.jobs_dir)
     worker = SynthesisWorker(server_settings, store)
+    gc = JobGarbageCollector(server_settings, store)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         worker.start()
+        gc.start()
         yield
+        gc.stop()
 
     app = FastAPI(title="tts-win", version="0.3.0", lifespan=lifespan)
     app.state.settings = server_settings
     app.state.store = store
     app.state.worker = worker
+    app.state.gc = gc
 
     @app.get("/health")
     def health() -> dict[str, Any]:
+        gc.sweep_now()
         return {
             "status": "ok",
             "model": server_settings.model,
             "shared_dir": str(server_settings.shared_dir),
             "jobs_dir": str(server_settings.jobs_dir),
+            "job_retention_hours": server_settings.job_retention_hours,
+            "downloaded_job_retention_hours": server_settings.downloaded_job_retention_hours,
         }
 
     @app.post("/v1/tts/jobs", status_code=status.HTTP_202_ACCEPTED)
     def create_tts_job(request: CreateTTSJobRequest) -> dict[str, Any]:
+        gc.sweep_now()
         if request.model != server_settings.model:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -497,6 +633,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/v1/tts/jobs/{job_id}")
     def get_tts_job(job_id: str) -> dict[str, Any]:
+        gc.sweep_now()
         job = store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
@@ -504,12 +641,14 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/v1/tts/jobs/{job_id}/audio")
     def get_tts_job_audio(job_id: str) -> FileResponse:
+        gc.sweep_now()
         job = store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
         audio_path = store.audio_path(job_id)
         if audio_path.is_file():
+            store.mark_downloaded(job_id)
             return FileResponse(path=audio_path, media_type="audio/wav", filename=f"{job_id}.wav")
 
         raise HTTPException(
@@ -560,6 +699,18 @@ def infer_reference_suffix(filename: str | None, mime_type: str | None) -> str:
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def log_line(handle, message: str) -> None:

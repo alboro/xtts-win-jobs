@@ -141,6 +141,9 @@ curl http://127.0.0.1:8020/v1/tts/jobs/<job_id>/audio --output result.wav
 - `response_format` is currently `wav` only.
 - the server uses one in-process worker, which keeps GPU generation serialized and simple.
 - jobs are persisted under `.data/jobs/`.
+- completed jobs are cleaned up automatically.
+- by default, terminal jobs are kept for `24` hours, and already-downloaded jobs are kept for `6` hours after the latest download.
+- cleanup runs on a background interval and also opportunistically on API requests.
 - the first request after server start may spend noticeable time on model warm-up.
 
 ## Chunking Strategy
