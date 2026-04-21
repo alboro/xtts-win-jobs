@@ -12,11 +12,13 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 XTTS_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
 DEFAULT_LANGUAGE = "ru"
 DEFAULT_MAX_CHARS = 180
+DEFAULT_SPLIT_SENTENCES = True
+DEFAULT_ENABLE_TEXT_SPLITTING = True
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SHARED_DIR = PROJECT_ROOT / "shared"
 DEFAULT_REFERENCE_PREFIX = "reference"
@@ -48,6 +50,23 @@ class ResolvedRun:
     reference_path: Path
     text_source_label: str
     reference_source_label: str
+
+
+@dataclass
+class XttsInferenceOptions:
+    language: str = DEFAULT_LANGUAGE
+    split_sentences: bool = DEFAULT_SPLIT_SENTENCES
+    enable_text_splitting: bool = DEFAULT_ENABLE_TEXT_SPLITTING
+    speed: float = 1.0
+    temperature: float | None = None
+    length_penalty: float | None = None
+    repetition_penalty: float | None = None
+    top_k: int | None = None
+    top_p: float | None = None
+    gpt_cond_len: int | None = None
+    gpt_cond_chunk_len: int | None = None
+    max_ref_len: int | None = None
+    sound_norm_refs: bool = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +130,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=XTTS_MODEL,
         help=f"Coqui model name. Default: {XTTS_MODEL}.",
+    )
+    parser.add_argument(
+        "--language",
+        default=DEFAULT_LANGUAGE,
+        help=f"Target language passed to XTTS. Default: {DEFAULT_LANGUAGE}.",
+    )
+    parser.add_argument(
+        "--split-sentences",
+        choices=("on", "off"),
+        default="on",
+        help="Use Coqui API sentence splitting before synthesis. Default: on.",
+    )
+    parser.add_argument(
+        "--enable-text-splitting",
+        choices=("on", "off"),
+        default="on",
+        help="Use XTTS model text splitting internally. Default: on.",
+    )
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help="XTTS speed factor. Keep near 1.0 to avoid artifacts. Default: 1.0.",
+    )
+    parser.add_argument("--temperature", type=float, default=None, help="XTTS temperature override.")
+    parser.add_argument("--length-penalty", type=float, default=None, help="XTTS length penalty override.")
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="XTTS repetition penalty override. Useful against long silences and filler sounds.",
+    )
+    parser.add_argument("--top-k", type=int, default=None, help="XTTS top-k override.")
+    parser.add_argument("--top-p", type=float, default=None, help="XTTS top-p override.")
+    parser.add_argument(
+        "--gpt-cond-len",
+        type=int,
+        default=None,
+        help="XTTS conditioning audio length in seconds. Uses model default when omitted.",
+    )
+    parser.add_argument(
+        "--gpt-cond-chunk-len",
+        type=int,
+        default=None,
+        help="XTTS conditioning chunk length in seconds. Uses model default when omitted.",
+    )
+    parser.add_argument(
+        "--max-ref-len",
+        type=int,
+        default=None,
+        help="XTTS maximum reference duration in seconds. Uses model default when omitted.",
+    )
+    parser.add_argument(
+        "--sound-norm-refs",
+        action="store_true",
+        help="Enable XTTS reference loudness normalization before computing conditioning latents.",
     )
     parser.add_argument(
         "--overwrite",
@@ -408,6 +483,74 @@ def split_text_for_xtts(text: str, max_chars: int) -> list[str]:
     return split_text_ru(text, max_chars=max_chars)
 
 
+def parse_on_off(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    raise ValueError(f"Expected 'on' or 'off', got: {value}")
+
+
+def build_inference_options(
+    *,
+    language: str,
+    split_sentences: bool,
+    enable_text_splitting: bool,
+    speed: float,
+    temperature: float | None = None,
+    length_penalty: float | None = None,
+    repetition_penalty: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    gpt_cond_len: int | None = None,
+    gpt_cond_chunk_len: int | None = None,
+    max_ref_len: int | None = None,
+    sound_norm_refs: bool = False,
+) -> XttsInferenceOptions:
+    return XttsInferenceOptions(
+        language=language,
+        split_sentences=split_sentences,
+        enable_text_splitting=enable_text_splitting,
+        speed=speed,
+        temperature=temperature,
+        length_penalty=length_penalty,
+        repetition_penalty=repetition_penalty,
+        top_k=top_k,
+        top_p=top_p,
+        gpt_cond_len=gpt_cond_len,
+        gpt_cond_chunk_len=gpt_cond_chunk_len,
+        max_ref_len=max_ref_len,
+        sound_norm_refs=sound_norm_refs,
+    )
+
+
+def build_xtts_kwargs(options: XttsInferenceOptions) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "enable_text_splitting": options.enable_text_splitting,
+        "speed": options.speed,
+    }
+    if options.temperature is not None:
+        kwargs["temperature"] = options.temperature
+    if options.length_penalty is not None:
+        kwargs["length_penalty"] = options.length_penalty
+    if options.repetition_penalty is not None:
+        kwargs["repetition_penalty"] = options.repetition_penalty
+    if options.top_k is not None:
+        kwargs["top_k"] = options.top_k
+    if options.top_p is not None:
+        kwargs["top_p"] = options.top_p
+    if options.gpt_cond_len is not None:
+        kwargs["gpt_cond_len"] = options.gpt_cond_len
+    if options.gpt_cond_chunk_len is not None:
+        kwargs["gpt_cond_chunk_len"] = options.gpt_cond_chunk_len
+    if options.max_ref_len is not None:
+        kwargs["max_ref_len"] = options.max_ref_len
+    if options.sound_norm_refs:
+        kwargs["sound_norm_refs"] = True
+    return kwargs
+
+
 def select_device(requested_device: str) -> str:
     import torch
 
@@ -426,15 +569,22 @@ def load_tts(model_name: str, device: str):
     return TTS(model_name).to(device)
 
 
-def synthesize_to_file(tts, text: str, reference_wav: Path, output_path: Path) -> None:
-    tts.tts_to_file(
+def synthesize_to_file(
+    tts,
+    text: str,
+    reference_wav: Path,
+    output_path: Path,
+    *,
+    options: XttsInferenceOptions,
+) -> None:
+    wav = tts.tts(
         text=text,
         speaker_wav=str(reference_wav),
-        language=DEFAULT_LANGUAGE,
-        file_path=str(output_path),
-        split_sentences=True,
-        enable_text_splitting=True,
+        language=options.language,
+        split_sentences=options.split_sentences,
+        **build_xtts_kwargs(options),
     )
+    tts.synthesizer.save_wav(wav=wav, path=str(output_path))
 
 
 def write_concat_manifest(chunk_paths: list[Path], manifest_path: Path) -> None:
@@ -499,6 +649,7 @@ def print_run_summary(
     reference_source_label: str,
     text: str,
     chunk_mode: str,
+    options: XttsInferenceOptions,
 ) -> None:
     word_count = len(text.split())
     estimated_audio = estimate_audio_duration_seconds(text)
@@ -511,8 +662,28 @@ def print_run_summary(
     print(f"Text size: {len(text)} chars, {word_count} words")
     print(f"Estimated speech: {format_duration(estimated_audio)}")
     print(f"Requested chunk mode: {chunk_mode}")
-    print("Model sentence splitting: enabled")
-    print("XTTS long-sentence splitting: enabled")
+    print(f"XTTS language: {options.language}")
+    print(f"Model sentence splitting: {'enabled' if options.split_sentences else 'disabled'}")
+    print(f"XTTS text splitting: {'enabled' if options.enable_text_splitting else 'disabled'}")
+    print(f"XTTS speed: {options.speed}")
+    if options.temperature is not None:
+        print(f"XTTS temperature: {options.temperature}")
+    if options.repetition_penalty is not None:
+        print(f"XTTS repetition_penalty: {options.repetition_penalty}")
+    if options.top_p is not None:
+        print(f"XTTS top_p: {options.top_p}")
+    if options.top_k is not None:
+        print(f"XTTS top_k: {options.top_k}")
+    if options.length_penalty is not None:
+        print(f"XTTS length_penalty: {options.length_penalty}")
+    if options.gpt_cond_len is not None:
+        print(f"XTTS gpt_cond_len: {options.gpt_cond_len}")
+    if options.gpt_cond_chunk_len is not None:
+        print(f"XTTS gpt_cond_chunk_len: {options.gpt_cond_chunk_len}")
+    if options.max_ref_len is not None:
+        print(f"XTTS max_ref_len: {options.max_ref_len}")
+    if options.sound_norm_refs:
+        print("XTTS sound_norm_refs: enabled")
 
 
 def print_finish_summary(
@@ -554,6 +725,7 @@ def synthesize_chunked(
     work_dir: Path,
     ffmpeg_bin: str,
     max_chars: int,
+    options: XttsInferenceOptions,
     log: Callable[[str], None] | None = None,
 ) -> int:
     emit = log or print
@@ -567,7 +739,7 @@ def synthesize_chunked(
             f"[chunk 1/1] start | {len(chunks[0])} chars | "
             f"est. {format_duration(estimate_audio_duration_seconds(chunks[0]))}"
         )
-        synthesize_to_file(tts, chunks[0], reference_wav, output_path)
+        synthesize_to_file(tts, chunks[0], reference_wav, output_path, options=options)
         emit(f"[chunk 1/1] done | {format_duration(time.perf_counter() - chunk_started)}")
         return 1
 
@@ -582,7 +754,7 @@ def synthesize_chunked(
             f"[chunk {index}/{len(chunks)}] start | {len(chunk_text)} chars | "
             f"est. {format_duration(estimate_audio_duration_seconds(chunk_text))}"
         )
-        synthesize_to_file(tts, chunk_text, reference_wav, chunk_path)
+        synthesize_to_file(tts, chunk_text, reference_wav, chunk_path, options=options)
         chunk_elapsed = time.perf_counter() - chunk_started
         emit(f"[chunk {index}/{len(chunks)}] done | {format_duration(chunk_elapsed)}")
         chunk_paths.append(chunk_path)
@@ -648,6 +820,21 @@ def main(argv: list[str] | None = None) -> int:
         reference_path = resolve_reference_path(resolved.reference_path)
         started_at = datetime.now().astimezone()
         run_started = time.perf_counter()
+        options = build_inference_options(
+            language=args.language,
+            split_sentences=parse_on_off(args.split_sentences),
+            enable_text_splitting=parse_on_off(args.enable_text_splitting),
+            speed=args.speed,
+            temperature=args.temperature,
+            length_penalty=args.length_penalty,
+            repetition_penalty=args.repetition_penalty,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            gpt_cond_len=args.gpt_cond_len,
+            gpt_cond_chunk_len=args.gpt_cond_chunk_len,
+            max_ref_len=args.max_ref_len,
+            sound_norm_refs=args.sound_norm_refs,
+        )
 
         print_run_summary(
             start_at=started_at,
@@ -658,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_source_label=resolved.reference_source_label,
             text=text,
             chunk_mode=args.chunk_mode,
+            options=options,
         )
 
         needs_ffmpeg_for_reference = reference_path.suffix.lower() != ".wav"
@@ -702,7 +890,7 @@ def main(argv: list[str] | None = None) -> int:
             if not prefer_chunking:
                 try:
                     print("Model-managed synthesis start")
-                    synthesize_to_file(tts, text, reference_wav, output_path)
+                    synthesize_to_file(tts, text, reference_wav, output_path, options=options)
                     print("Model-managed synthesis done")
                 except Exception as exc:
                     if args.chunk_mode != "auto":
@@ -720,6 +908,7 @@ def main(argv: list[str] | None = None) -> int:
                         work_dir=work_dir,
                         ffmpeg_bin=ffmpeg_bin,
                         max_chars=args.max_chars,
+                        options=options,
                     )
             else:
                 chunk_count = synthesize_chunked(
@@ -730,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
                     work_dir=work_dir,
                     ffmpeg_bin=ffmpeg_bin,
                     max_chars=args.max_chars,
+                    options=options,
                 )
 
             synthesis_seconds = time.perf_counter() - synthesis_started
@@ -755,7 +945,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-
 
 
 

@@ -23,11 +23,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from tts_win.cli import (
+    DEFAULT_ENABLE_TEXT_SPLITTING,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_CHARS,
+    DEFAULT_SPLIT_SENTENCES,
     DEFAULT_SHARED_DIR,
     PROJECT_ROOT,
     XTTS_MODEL,
+    build_inference_options,
     convert_reference_to_wav,
     estimate_audio_duration_seconds,
     find_reference_in_shared,
@@ -73,6 +76,19 @@ class CreateTTSJobRequest(BaseModel):
     model: str = Field(default=XTTS_MODEL)
     voice: str = Field(default="reference")
     response_format: str = Field(default="wav")
+    language: str | None = None
+    split_sentences: bool | None = None
+    enable_text_splitting: bool | None = None
+    speed: float | None = Field(default=None, gt=0)
+    temperature: float | None = Field(default=None, ge=0)
+    length_penalty: float | None = Field(default=None, gt=0)
+    repetition_penalty: float | None = Field(default=None, gt=0)
+    top_k: int | None = Field(default=None, gt=0)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    gpt_cond_len: int | None = Field(default=None, gt=0)
+    gpt_cond_chunk_len: int | None = Field(default=None, gt=0)
+    max_ref_len: int | None = Field(default=None, gt=0)
+    sound_norm_refs: bool | None = None
     reference_audio_base64: str | None = None
     reference_audio_filename: str | None = None
     metadata: dict[str, Any] | None = None
@@ -89,6 +105,19 @@ class ServerSettings:
     ffmpeg: str = "ffmpeg"
     chunk_mode: str = "auto"
     max_chars: int = DEFAULT_MAX_CHARS
+    language: str = DEFAULT_LANGUAGE
+    split_sentences: bool = DEFAULT_SPLIT_SENTENCES
+    enable_text_splitting: bool = DEFAULT_ENABLE_TEXT_SPLITTING
+    speed: float = 1.0
+    temperature: float | None = None
+    length_penalty: float | None = None
+    repetition_penalty: float | None = None
+    top_k: int | None = None
+    top_p: float | None = None
+    gpt_cond_len: int | None = None
+    gpt_cond_chunk_len: int | None = None
+    max_ref_len: int | None = None
+    sound_norm_refs: bool = False
     job_retention_hours: int = DEFAULT_JOB_RETENTION_HOURS
     downloaded_job_retention_hours: int = DEFAULT_DOWNLOADED_JOB_RETENTION_HOURS
     cleanup_interval_seconds: int = DEFAULT_CLEANUP_INTERVAL_SECONDS
@@ -168,6 +197,19 @@ class JobStore:
             "model": request.model,
             "voice": request.voice,
             "response_format": request.response_format,
+            "language": request.language,
+            "split_sentences": request.split_sentences,
+            "enable_text_splitting": request.enable_text_splitting,
+            "speed": request.speed,
+            "temperature": request.temperature,
+            "length_penalty": request.length_penalty,
+            "repetition_penalty": request.repetition_penalty,
+            "top_k": request.top_k,
+            "top_p": request.top_p,
+            "gpt_cond_len": request.gpt_cond_len,
+            "gpt_cond_chunk_len": request.gpt_cond_chunk_len,
+            "max_ref_len": request.max_ref_len,
+            "sound_norm_refs": request.sound_norm_refs,
             "metadata": request.metadata or {},
             "reference_audio_uploaded": bool(request.reference_audio_base64),
             "reference_audio_filename": request.reference_audio_filename,
@@ -399,8 +441,19 @@ class SynthesisWorker:
                 reference_path = resolve_reference_path(reference_path)
                 output_path = self.store.audio_path(job_id)
                 ffmpeg_bin = self._resolve_ffmpeg(reference_path)
+                request_payload = self._load_job_request_payload(job_id)
+                text = str(request_payload["input"]).strip()
+                options = self._build_job_inference_options(request_payload)
 
                 log_line(log_file, f"Reference selected: {reference_path}")
+                log_line(
+                    log_file,
+                    "XTTS options: "
+                    f"language={options.language}, "
+                    f"split_sentences={options.split_sentences}, "
+                    f"enable_text_splitting={options.enable_text_splitting}, "
+                    f"speed={options.speed}",
+                )
                 chunk_count = 0
                 runtime_started = time.perf_counter()
                 synthesis_started = time.perf_counter()
@@ -408,10 +461,11 @@ class SynthesisWorker:
                 with redirect_stdout(log_file), redirect_stderr(log_file):
                     chunk_count = self._run_synthesis(
                         loaded_model=loaded_model,
-                        text=self._load_job_text(job_id),
+                        text=text,
                         reference_path=reference_path,
                         output_path=output_path,
                         ffmpeg_bin=ffmpeg_bin,
+                        options=options,
                         log=lambda message: log_line(log_file, message),
                     )
 
@@ -441,10 +495,35 @@ class SynthesisWorker:
                 )
                 log_line(log_file, f"Job {job_id} failed at {failed_at}: {exc}")
 
-    def _load_job_text(self, job_id: str) -> str:
+    def _load_job_request_payload(self, job_id: str) -> dict[str, Any]:
         request_path = self.store.job_dir(job_id) / "request.json"
-        payload = json.loads(request_path.read_text(encoding="utf-8"))
-        return str(payload["input"]).strip()
+        return json.loads(request_path.read_text(encoding="utf-8"))
+
+    def _build_job_inference_options(self, payload: dict[str, Any]):
+        return build_inference_options(
+            language=_pick_override(payload.get("language"), self.settings.language),
+            split_sentences=_pick_override(payload.get("split_sentences"), self.settings.split_sentences),
+            enable_text_splitting=_pick_override(
+                payload.get("enable_text_splitting"),
+                self.settings.enable_text_splitting,
+            ),
+            speed=float(_pick_override(payload.get("speed"), self.settings.speed)),
+            temperature=_pick_override(payload.get("temperature"), self.settings.temperature),
+            length_penalty=_pick_override(payload.get("length_penalty"), self.settings.length_penalty),
+            repetition_penalty=_pick_override(
+                payload.get("repetition_penalty"),
+                self.settings.repetition_penalty,
+            ),
+            top_k=_pick_override(payload.get("top_k"), self.settings.top_k),
+            top_p=_pick_override(payload.get("top_p"), self.settings.top_p),
+            gpt_cond_len=_pick_override(payload.get("gpt_cond_len"), self.settings.gpt_cond_len),
+            gpt_cond_chunk_len=_pick_override(
+                payload.get("gpt_cond_chunk_len"),
+                self.settings.gpt_cond_chunk_len,
+            ),
+            max_ref_len=_pick_override(payload.get("max_ref_len"), self.settings.max_ref_len),
+            sound_norm_refs=_pick_override(payload.get("sound_norm_refs"), self.settings.sound_norm_refs),
+        )
 
     def _resolve_reference_path(self, job_id: str, job: dict[str, Any]) -> Path:
         uploaded_reference = self.store.uploaded_reference_path(job_id)
@@ -465,6 +544,7 @@ class SynthesisWorker:
         reference_path: Path,
         output_path: Path,
         ffmpeg_bin: str | None,
+        options,
         log: Callable[[str], None] | None = None,
     ) -> int:
         job_chunk_mode = self.settings.chunk_mode
@@ -484,7 +564,7 @@ class SynthesisWorker:
             if not prefer_chunking:
                 try:
                     log_message("Model-managed synthesis start")
-                    synthesize_to_file(loaded_model.tts, text, reference_wav, output_path)
+                    synthesize_to_file(loaded_model.tts, text, reference_wav, output_path, options=options)
                     log_message("Model-managed synthesis done")
                     return 0
                 except Exception as exc:
@@ -504,6 +584,7 @@ class SynthesisWorker:
                 work_dir=work_dir,
                 ffmpeg_bin=require_ffmpeg(self.settings.ffmpeg),
                 max_chars=self.settings.max_chars,
+                options=options,
                 log=log_message,
             )
         finally:
@@ -524,6 +605,27 @@ def parse_args(argv: list[str] | None = None) -> ServerSettings:
     parser.add_argument("--model", default=XTTS_MODEL)
     parser.add_argument("--chunk-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument("--language", default=DEFAULT_LANGUAGE)
+    parser.add_argument(
+        "--split-sentences",
+        choices=("on", "off"),
+        default="on" if DEFAULT_SPLIT_SENTENCES else "off",
+    )
+    parser.add_argument(
+        "--enable-text-splitting",
+        choices=("on", "off"),
+        default="on" if DEFAULT_ENABLE_TEXT_SPLITTING else "off",
+    )
+    parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--length-penalty", type=float, default=None)
+    parser.add_argument("--repetition-penalty", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--gpt-cond-len", type=int, default=None)
+    parser.add_argument("--gpt-cond-chunk-len", type=int, default=None)
+    parser.add_argument("--max-ref-len", type=int, default=None)
+    parser.add_argument("--sound-norm-refs", action="store_true")
     parser.add_argument("--job-retention-hours", type=int, default=DEFAULT_JOB_RETENTION_HOURS)
     parser.add_argument(
         "--downloaded-job-retention-hours",
@@ -546,6 +648,19 @@ def parse_args(argv: list[str] | None = None) -> ServerSettings:
         model=args.model,
         chunk_mode=args.chunk_mode,
         max_chars=args.max_chars,
+        language=str(args.language).strip() or DEFAULT_LANGUAGE,
+        split_sentences=args.split_sentences == "on",
+        enable_text_splitting=args.enable_text_splitting == "on",
+        speed=args.speed,
+        temperature=args.temperature,
+        length_penalty=args.length_penalty,
+        repetition_penalty=args.repetition_penalty,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        gpt_cond_len=args.gpt_cond_len,
+        gpt_cond_chunk_len=args.gpt_cond_chunk_len,
+        max_ref_len=args.max_ref_len,
+        sound_norm_refs=args.sound_norm_refs,
         job_retention_hours=max(args.job_retention_hours, 0),
         downloaded_job_retention_hours=max(args.downloaded_job_retention_hours, 0),
         cleanup_interval_seconds=max(args.cleanup_interval_seconds, 1),
@@ -582,6 +697,10 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
             "model": server_settings.model,
             "shared_dir": str(server_settings.shared_dir),
             "jobs_dir": str(server_settings.jobs_dir),
+            "language": server_settings.language,
+            "split_sentences": server_settings.split_sentences,
+            "enable_text_splitting": server_settings.enable_text_splitting,
+            "speed": server_settings.speed,
             "job_retention_hours": server_settings.job_retention_hours,
             "downloaded_job_retention_hours": server_settings.downloaded_job_retention_hours,
         }
@@ -606,6 +725,19 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
             model=request.model,
             voice=(request.voice or "reference").strip() or "reference",
             response_format=request.response_format.lower(),
+            language=(request.language or "").strip() or None,
+            split_sentences=request.split_sentences,
+            enable_text_splitting=request.enable_text_splitting,
+            speed=request.speed,
+            temperature=request.temperature,
+            length_penalty=request.length_penalty,
+            repetition_penalty=request.repetition_penalty,
+            top_k=request.top_k,
+            top_p=request.top_p,
+            gpt_cond_len=request.gpt_cond_len,
+            gpt_cond_chunk_len=request.gpt_cond_chunk_len,
+            max_ref_len=request.max_ref_len,
+            sound_norm_refs=request.sound_norm_refs,
             reference_audio_base64=request.reference_audio_base64,
             reference_audio_filename=request.reference_audio_filename,
             metadata=request.metadata,
@@ -719,6 +851,10 @@ def log_line(handle, message: str) -> None:
     handle.flush()
 
 
+def _pick_override(value: Any, default: Any) -> Any:
+    return default if value is None else value
+
+
 def main(argv: list[str] | None = None) -> int:
     settings = parse_args(argv)
     app = create_app(settings)
@@ -731,4 +867,3 @@ app = create_app()
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

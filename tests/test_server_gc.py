@@ -8,6 +8,7 @@ import sys
 import types
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FAKE_PROJECT_ROOT = Path(tempfile.gettempdir()) / "xtts_win_jobs_test_root"
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 if "uvicorn" not in sys.modules:
@@ -49,14 +50,17 @@ if "pydantic" not in sys.modules:
 
 if "tts_win.cli" not in sys.modules:
     fake_cli = types.SimpleNamespace(
+        DEFAULT_ENABLE_TEXT_SPLITTING=True,
         DEFAULT_LANGUAGE="ru",
         DEFAULT_MAX_CHARS=180,
-        DEFAULT_SHARED_DIR=PROJECT_ROOT / "shared",
-        PROJECT_ROOT=PROJECT_ROOT,
+        DEFAULT_SPLIT_SENTENCES=True,
+        DEFAULT_SHARED_DIR=FAKE_PROJECT_ROOT / "shared",
+        PROJECT_ROOT=FAKE_PROJECT_ROOT,
         XTTS_MODEL="tts_models/multilingual/multi-dataset/xtts_v2",
+        build_inference_options=lambda **kwargs: kwargs,
         convert_reference_to_wav=lambda *args, **kwargs: args[0],
         estimate_audio_duration_seconds=lambda text: float(len(text.split())),
-        find_reference_in_shared=lambda *args, **kwargs: PROJECT_ROOT / "shared" / "reference.wav",
+        find_reference_in_shared=lambda *args, **kwargs: FAKE_PROJECT_ROOT / "shared" / "reference.wav",
         load_tts=lambda *args, **kwargs: object(),
         require_ffmpeg=lambda value: value,
         resolve_ffmpeg=lambda value: value,
@@ -79,6 +83,19 @@ class DummyRequest:
         model: str = "tts_models/multilingual/multi-dataset/xtts_v2",
         voice: str = "reference",
         response_format: str = "wav",
+        language: str | None = None,
+        split_sentences: bool | None = None,
+        enable_text_splitting: bool | None = None,
+        speed: float | None = None,
+        temperature: float | None = None,
+        length_penalty: float | None = None,
+        repetition_penalty: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        gpt_cond_len: int | None = None,
+        gpt_cond_chunk_len: int | None = None,
+        max_ref_len: int | None = None,
+        sound_norm_refs: bool | None = None,
         metadata: dict | None = None,
         reference_audio_base64: str | None = None,
         reference_audio_filename: str | None = None,
@@ -87,6 +104,19 @@ class DummyRequest:
         self.model = model
         self.voice = voice
         self.response_format = response_format
+        self.language = language
+        self.split_sentences = split_sentences
+        self.enable_text_splitting = enable_text_splitting
+        self.speed = speed
+        self.temperature = temperature
+        self.length_penalty = length_penalty
+        self.repetition_penalty = repetition_penalty
+        self.top_k = top_k
+        self.top_p = top_p
+        self.gpt_cond_len = gpt_cond_len
+        self.gpt_cond_chunk_len = gpt_cond_chunk_len
+        self.max_ref_len = max_ref_len
+        self.sound_norm_refs = sound_norm_refs
         self.metadata = metadata
         self.reference_audio_base64 = reference_audio_base64
         self.reference_audio_filename = reference_audio_filename

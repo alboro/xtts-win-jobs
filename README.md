@@ -19,6 +19,7 @@ The repo has two layers:
 - newest matching reference wins by prefix, regardless of format
 - ffmpeg-based reference conversion when needed
 - model-managed sentence splitting by default, with external chunking only as fallback or on demand
+- XTTS tuning knobs exposed in both CLI and async jobs API
 - async `/v1/tts/jobs` API with polling and audio download
 - start/end timing, estimated speech duration, and throughput logs
 
@@ -54,6 +55,19 @@ Run the CLI:
 
 ```cmd
 tts-win.cmd text.txt .\output\speech.wav
+```
+
+Russian audiobook preset to try first:
+
+```cmd
+tts-win.cmd text.txt .\output\speech.wav ^
+  --language ru ^
+  --split-sentences on ^
+  --enable-text-splitting on ^
+  --speed 1.0 ^
+  --temperature 0.6 ^
+  --top-p 0.8 ^
+  --repetition-penalty 2.2
 ```
 
 ## CLI Reference Lookup
@@ -120,6 +134,25 @@ POST /v1/tts/jobs
 }
 ```
 
+Create a job with XTTS tuning overrides:
+
+```json
+POST /v1/tts/jobs
+{
+  "input": "Привет. Это тест длинной озвучки.",
+  "voice": "reference",
+  "response_format": "wav",
+  "language": "ru",
+  "split_sentences": true,
+  "enable_text_splitting": true,
+  "speed": 1.0,
+  "temperature": 0.6,
+  "top_p": 0.8,
+  "repetition_penalty": 2.2,
+  "sound_norm_refs": true
+}
+```
+
 Poll status:
 
 ```cmd
@@ -146,6 +179,21 @@ curl http://127.0.0.1:8020/v1/tts/jobs/<job_id>/audio --output result.wav
 - cleanup runs on a background interval and also opportunistically on API requests.
 - the first request after server start may spend noticeable time on model warm-up.
 
+Server-level defaults can also be tuned at startup:
+
+```cmd
+tts-win-server.cmd ^
+  --host 127.0.0.1 ^
+  --port 8020 ^
+  --language ru ^
+  --split-sentences on ^
+  --enable-text-splitting on ^
+  --speed 1.0 ^
+  --temperature 0.6 ^
+  --top-p 0.8 ^
+  --repetition-penalty 2.2
+```
+
 ## Chunking Strategy
 
 `tts-win` prefers the model's own sentence splitting first and lets XTTS split overlong sentences internally when needed.
@@ -157,6 +205,24 @@ That usually sounds better than manual chunk boundaries.
 - `auto`: try model-managed synthesis first, fall back to external manual chunking only if needed
 - `on`: force external manual chunking
 - `off`: never use external manual chunking
+
+## XTTS Quality Notes
+
+The best quality improvements usually come from three places:
+
+- a cleaner and steadier reference voice
+- keeping XTTS close to its natural defaults instead of pushing speed too hard
+- reducing randomness a bit for long-form narration
+
+Practical notes for Russian long-form speech:
+
+- Keep `speed` close to `1.0`. Bigger deviations can add artifacts.
+- If the model sounds too jumpy or inconsistent, try lowering `temperature` first.
+- If you hear long silences or filler-like tails, try raising `repetition_penalty` slightly.
+- Keep `split_sentences` and `enable_text_splitting` on until you have a concrete reason to disable them.
+- `sound_norm_refs` can help when the reference clip is noticeably uneven in loudness.
+
+One important improvement still worth considering later: XTTS v2 supports multiple reference files for better cloning, while this repo currently chooses the newest matching reference file only.
 
 ## Project Layout
 
